@@ -51,9 +51,9 @@ If you want to run this autonomous agent on your own Google Account:
 
 **5. Set the Triggers (Cron Jobs):**
 - Click the **Clock icon (Triggers)** on the left menu.
-- Add an hourly trigger for `aiIsAvcisiBaslat` (Email Scanner).
-- Add a 2-hour trigger for `webSiteleriniTara` (Web Spider).
-- Add a daily trigger (e.g., 3 AM) for `tabloyuSifirla` (Table reset).
+- Add an hourly trigger for `runEmailScanner` (Email Scanner).
+- Add a 2-hour trigger for `runWebSpider` (Web Spider).
+- Add a daily trigger (e.g., 3 AM) for `resetGoogleSheet` (Table reset).
 
 ## 🛠️ Tech Stack
 - **JavaScript (ES5/ES6)**
