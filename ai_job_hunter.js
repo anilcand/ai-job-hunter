@@ -4,13 +4,17 @@
 
 // --- USER SETTINGS ---
 var CV_DOC_ID = "YOUR_GOOGLE_DOC_CV_ID_HERE";
-var SHEET_ID = "YOUR_GOOGLE_SHEET_ID_HERE"; 
+var SHEET_ID = "YOUR_GOOGLE_SHEET_ID_HERE";
 var LABEL_NAME = "job_search_scanning"; 
 var MIN_MATCH_SCORE = 65; 
+var EXCLUDE_JOB_TYPES = "active student roles, unpaid internships, volunteer work, senior academic roles (Professor, PostDoc)";
+var INCLUDE_JOB_TYPES = "Corporate roles, Industry positions, PhD Researcher, Doctoral Student";
 
 var GEMINI_API_KEY = PropertiesService.getScriptProperties().getProperty("GEMINI_API_KEY");
 
-// --- MAIN FUNCTION: EMAIL SCANNER ---
+// ==========================================
+// 1. EMAIL SCANNER
+// ==========================================
 function runEmailScanner() {
   Logger.log("🚀 AI Job Hunter: Starting Email Scan...");
   
@@ -21,11 +25,11 @@ function runEmailScanner() {
   
   var myCvText = "";
   try { myCvText = DocumentApp.openById(CV_DOC_ID).getBody().getText(); } 
-  catch(e) { Logger.log("ERROR: Failed to read CV. Check ID."); return; }
+  catch(e) { Logger.log("ERROR: Failed to read CV."); return; }
   
   var sheet = SpreadsheetApp.openById(SHEET_ID).getActiveSheet();
   var label = GmailApp.getUserLabelByName(LABEL_NAME);
-  if (!label) { Logger.log("ERROR: Gmail Label not found."); return; }
+  if (!label) { Logger.log("ERROR: Label not found."); return; }
   
   var threads = label.getThreads();
   var processedCount = 0;
@@ -42,11 +46,16 @@ function runEmailScanner() {
           var subject = message.getSubject();
           var date = message.getDate();
           var body = message.getPlainBody();
+          
+          // Split the email body by dash separators (to handle newsletter formats)
           var subMessages = body.split(/-{30,}/);
           
-          for (var i = 1; i < subMessages.length; i++) {
+          // CRITICAL FIX: If no dashes found (single job email), start at index 0. 
+          // If it's a newsletter, start at index 1 to skip the intro text.
+          var startIndex = (subMessages.length > 1) ? 1 : 0;
+          
+          for (var i = startIndex; i < subMessages.length; i++) {
             var jobText = subMessages[i].trim();
-            // Remove email headers
             jobText = jobText.replace(/^(Message:|Date:|From:|To:|Subject:|Message-ID:|Content-Type:|Content-Transfer-Encoding:|Reply-To:).*\n?/gim, "").trim();
             jobText = jobText.substring(0, 3000); 
             
@@ -65,21 +74,25 @@ function runEmailScanner() {
                 Logger.log("✅ MATCH FOUND! Score: " + aiAnalysis.score + "%");
                 var actualTitle = aiAnalysis.job_title ? aiAnalysis.job_title : subject;
                 var shortSummary = aiAnalysis.summary ? aiAnalysis.summary : "No summary provided.";
+                var jobType = aiAnalysis.job_type ? aiAnalysis.job_type : "Unknown";
                 
-                sheet.appendRow([date, aiAnalysis.score + "%", actualTitle, aiAnalysis.reason, shortSummary, threadLink]);
+                // ORDER: Date, Type, Score, Title, Reason, Summary, Link
+                sheet.appendRow([date, jobType, aiAnalysis.score + "%", actualTitle, aiAnalysis.reason, shortSummary, threadLink]);
               }
-              Utilities.sleep(6000); // Prevent quota limits
             }
           }
         } 
-      });
+      }); // messages.forEach ends
       processedCount++;
     }
-  });
+  }); // threads.forEach ends
+  
   Logger.log("🎉 Email Scan Completed.");
 }
 
-// --- HELPER: GET AVAILABLE GEMINI MODEL ---
+// ==========================================
+// 2. HELPER FUNCTIONS 
+// ==========================================
 function getActiveModel(apiKey) {
   var url = "https://generativelanguage.googleapis.com/v1beta/models?key=" + apiKey;
   try {
@@ -101,18 +114,18 @@ function getActiveModel(apiKey) {
   return null;
 }
 
-// --- HELPER: GEMINI API CALL ---
 function evaluateWithGemini(cvText, jobText, modelName) {
   var url = "https://generativelanguage.googleapis.com/v1beta/" + modelName + ":generateContent?key=" + GEMINI_API_KEY;
   
-  var prompt = "You are an expert HR ATS AI. Read the following Job Posting text and compare it with the Candidate CV. " +
-               "CRITICAL RULE: The candidate has graduated. If the job is strictly for active students (e.g., 'Student', 'Studentische Hilfskraft'), " +
-               "or if it is 'volunteer', 'unpaid', or an 'unpaid internship', you MUST assign a score of 0.\n\n" +
-               "Return ONLY a valid JSON object with EXACTLY these four keys:\n" +
+var prompt = "You are an expert HR ATS AI. Read the following Job Posting text and compare it with the Candidate CV.\n\n" +
+               "CRITICAL RULE 1: If the job explicitly falls into any of these exclusion categories: [" + EXCLUDE_JOB_TYPES + "], you MUST assign a score of 0.\n" +
+               "CRITICAL RULE 2: Roles matching these inclusion categories: [" + INCLUDE_JOB_TYPES + "] ARE FULLY VALID. Do not assign them a 0 automatically. Evaluate and score them normally based on how well the candidate's skills match the requirements.\n\n" +
+               "Return ONLY a valid JSON object with EXACTLY these five keys:\n" +
                "1. 'score': integer from 0 to 100 (match percentage).\n" +
                "2. 'reason': 2-sentence explanation of the score.\n" +
                "3. 'job_title': Extract the ACTUAL specific Job Title and Company from the text.\n" +
-               "4. 'summary': Write a very short, 1-sentence crisp summary of the role.\n\n" +
+               "4. 'summary': Write a very short, 1-sentence crisp summary of the role.\n" +
+               "5. 'job_type': Classify the job appropriately (e.g., 'Corporate', 'Academic', 'Freelance', etc.).\n\n" +
                "Do not include markdown code blocks or any other text.\n\n" +
                "Candidate CV:\n" + cvText + "\n\n" +
                "Job Posting:\n" + jobText;
@@ -138,8 +151,9 @@ function evaluateWithGemini(cvText, jobText, modelName) {
     return null;
   }
 }
-
-// --- NIGHT WATCHMAN: RESET TABLE ---
+// ==========================================
+// 3. NIGHT WATCHMAN (RESET SHEET)
+// ==========================================
 function resetGoogleSheet() {
   var sheet = SpreadsheetApp.openById(SHEET_ID).getActiveSheet();
   var lastRow = sheet.getLastRow();
@@ -151,11 +165,61 @@ function resetGoogleSheet() {
     Logger.log("Table is already empty.");
   }
 }
-
 // ==========================================
-// 🕸️ WEB SPIDER (SCRAPER)
+// 4. DISCOVERY TEST (MANUAL CHECK)
 // ==========================================
+function runDiscoveryTest() {
+  Logger.log("🕵️‍♂️ STARTING DISCOVERY TESTS...");
 
+  // --- TARGETS TO TEST ---
+  // Users can add or remove companies here easily.
+  var testTargets = [
+    {
+      name: "Company A",
+      url: "https://jobs.companya.com/search/?q=Junior",
+      keywords: ["jobTitle", "Engineer", "Junior"]
+    },
+    {
+      name: "Company B",
+      url: "https://jobs.companyb.com/en_US/search",
+      keywords: ["job-title", "Developer"]
+    },
+    {
+      name: "Company C",
+      url: "https://careers.companyc.com/search",
+      keywords: ["vacancy", "Manager", "HR"]
+    }
+  ];
+
+  testTargets.forEach(function(target) {
+    Logger.log("-----------------------------------");
+    Logger.log("🕵️‍♂️ TESTING: " + target.name);
+    try {
+      var response = UrlFetchApp.fetch(target.url, {muteHttpExceptions: true});
+      var html = response.getContentText();
+      Logger.log(target.name + " Response Code: " + response.getResponseCode());
+      
+      // Check if any of the indicator keywords exist in the HTML
+      var keywordFound = false;
+      for (var i = 0; i < target.keywords.length; i++) {
+        if (html.indexOf(target.keywords[i]) > -1) {
+          keywordFound = true;
+          break;
+        }
+      }
+      
+      Logger.log("Job data in HTML? : " + (keywordFound ? "✅ YES! (Visible)" : "❌ NO (Hidden or JS rendered)."));
+    } catch(e) {
+      Logger.log("❌ " + target.name + " Error: " + e.toString());
+    }
+  });
+  
+  Logger.log("-----------------------------------");
+  Logger.log("🏁 DISCOVERY TESTS COMPLETED.");
+}
+// ==========================================
+// 5. WEB SPIDER (SCRAPER)
+// ==========================================
 function runWebSpider() {
   Logger.log("🕸️ Web Spider Starting...");
   
@@ -168,19 +232,20 @@ function runWebSpider() {
   
   var sheet = SpreadsheetApp.openById(SHEET_ID).getActiveSheet();
   
- // --- TARGET LIST (Add your target career sites here) ---
+  // --- TARGET CAREER SITES ---
+  // Add your target company job portals here.
   var targets = [
     {
       name: "Company A",
-      listUrl: "https://jobs.companya.com/search/special_filters",
+      listUrl: "https://jobs.companya.com/search/?q=Junior&location=Remote",
       baseUrl: "https://jobs.companya.com",
-      regex: /href="(\/job\/[^"]+)"/g  // For relative URLs (e.g., /job/12345)
+      regex: /href="(\/job\/[^"]+)"/g  // Matches relative URLs (e.g., /job/12345)
     },
     {
       name: "Company B",
-      listUrl: "https://jobs.companyb.com/en_US/special_filters",
+      listUrl: "https://jobs.companyb.com/en_US/search",
       baseUrl: "", 
-      regex: /href="(https:\/\/jobs\.companyb\.com\/[^"]+\/JobDetail\/[^"]+)"/gi // For absolute URLs
+      regex: /href="(https:\/\/jobs\.companyb\.com\/[^"]+\/JobDetail\/[^"]+)"/gi // Matches absolute URLs
     }
   ];
   
@@ -208,7 +273,6 @@ function runWebSpider() {
         
         var jobHtml = UrlFetchApp.fetch(link, {muteHttpExceptions: true}).getContentText();
         
-        // Strip HTML tags and scripts
         var jobText = jobHtml.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
                              .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
                              .replace(/<[^>]+>/g, ' ')
@@ -231,8 +295,10 @@ function runWebSpider() {
               Logger.log("✅ MATCH FOUND! Score: " + aiAnalysis.score + "%");
               var actualTitle = aiAnalysis.job_title ? ("[" + target.name + "] " + aiAnalysis.job_title) : ("[" + target.name + "] New Job");
               var shortSummary = aiAnalysis.summary ? aiAnalysis.summary : "No summary provided.";
+              var jobType = aiAnalysis.job_type ? aiAnalysis.job_type : "Unknown";
               
-              sheet.appendRow([today, aiAnalysis.score + "%", actualTitle, aiAnalysis.reason, shortSummary, link]);
+              // ORDER: Date, Type, Score, Title, Reason, Summary, Link
+              sheet.appendRow([today, jobType, aiAnalysis.score + "%", actualTitle, aiAnalysis.reason, shortSummary, link]);
            }
            Utilities.sleep(6000); 
         }
@@ -244,4 +310,93 @@ function runWebSpider() {
   });
   
   Logger.log("🕸️ Web Spider Completed.");
+}
+// ==========================================
+// 6. UNIVERSAL LINK DETECTIVE
+// ==========================================
+function runLinkDetective() {
+  var SITE_NAME = "Example Company"; 
+  var TEST_URL = "https://careers.example-company.com/search/"; 
+  var WORD_FILTER = "job"; 
+  
+  inspectSiteLinks(SITE_NAME, TEST_URL, WORD_FILTER);
+}
+
+function inspectSiteLinks(name, url, filter) {
+  Logger.log("🕵️‍♂️ Inspecting site [" + name + "]: " + url);
+  
+  if(filter !== "") {
+    Logger.log("🔍 Searching for links containing: '" + filter + "'...");
+  } else {
+    Logger.log("🔍 No filter applied, fetching all long links...");
+  }
+  
+  try {
+    var response = UrlFetchApp.fetch(url, {muteHttpExceptions: true});
+    var html = response.getContentText();
+    
+    var regex = /href="([^"]+)"/gi; 
+    var match;
+    var links = [];
+    
+    while ((match = regex.exec(html)) !== null) {
+      var foundLink = match[1];
+      
+      if (foundLink.length > 15 && links.indexOf(foundLink) === -1) { 
+        if (filter === "" || foundLink.toLowerCase().indexOf(filter.toLowerCase()) !== -1) {
+          links.push(foundLink);
+        }
+      }
+    }
+    
+    Logger.log("-----------------------------------------");
+    if (links.length === 0) {
+      Logger.log("❌ No useful links found. The site might be using hidden JavaScript elements.");
+    } else {
+      Logger.log("✅ Found " + links.length + " unique links:");
+      for (var i = 0; i < links.length; i++) {
+        Logger.log((i+1) + ". " + links[i]);
+      }
+    }
+    Logger.log("-----------------------------------------");
+    
+  } catch(e) {
+    Logger.log("❌ Error accessing site! Details: " + e.toString());
+  }
+}
+
+// ==========================================
+// 7. QUICK TEST: SCORE REVEALER
+// ==========================================
+function runQuickScoreTest() {
+  Logger.log("🧪 Starting Quick Score Test with a sample job posting...");
+  
+  if (!GEMINI_API_KEY) { Logger.log("ERROR: API Key not found!"); return; }
+  
+  var activeModel = getActiveModel(GEMINI_API_KEY);
+  if (!activeModel) { Logger.log("ERROR: Model not found!"); return; }
+  
+  var myCvText = "";
+  try { myCvText = DocumentApp.openById(CV_DOC_ID).getBody().getText(); } 
+  catch(e) { Logger.log("ERROR: Failed to read CV."); return; }
+  
+  // A generic sample job text for testing purposes
+  var testJobText = "Company X is currently looking for an enthusiastic professional to join our team. " +
+                    "The ideal candidate will have strong analytical skills, experience working in dynamic environments, " +
+                    "and a passion for continuous learning. Responsibilities include managing projects, collaborating with " +
+                    "cross-functional teams, and driving innovative solutions. If you are a proactive problem solver " +
+                    "with excellent communication skills, we encourage you to apply. Equal opportunity employer.";
+
+  Logger.log("Sending the text to AI for evaluation...");
+  var aiAnalysis = evaluateWithGemini(myCvText, testJobText, activeModel);
+  
+  Logger.log("================ AI VERDICT ================");
+  if (aiAnalysis === "QUOTA_ERROR") {
+    Logger.log("Quota Reached! Try again in a minute.");
+  } else if (aiAnalysis) {
+    Logger.log(JSON.stringify(aiAnalysis, null, 2)); // Prints the exact JSON response neatly
+  } else {
+    Logger.log("AI returned null. Something went wrong.");
+  }
+  Logger.log("============================================");
 }
